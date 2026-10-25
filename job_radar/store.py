@@ -156,46 +156,7 @@ class MongoStore:
         ]
 
     def check_and_increment_rate_limit(self, user_id: int, action: str) -> bool:
-        if settings.allowed_chat_ids:
-            return user_id in settings.allowed_chat_ids
-
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        limit = (
-            settings.max_resume_uploads_per_day
-            if action == "resume"
-            else settings.max_jobs_calls_per_day
-        )
-
-        if self.db is not None:
-            try:
-                user = self.db.users.find_one({"user_id": user_id})
-                daily = user.get("daily_usage", {}) if user else {}
-                count = daily.get(action, 0) if daily.get("date") == today else 0
-                if count >= limit:
-                    return False
-                new_usage = {
-                    "date": today,
-                    "resume": (daily.get("resume", 0) if daily.get("date") == today else 0) + (1 if action == "resume" else 0),
-                    "jobs": (daily.get("jobs", 0) if daily.get("date") == today else 0) + (1 if action == "jobs" else 0),
-                }
-                self.db.users.update_one({"user_id": user_id}, {"$set": {"daily_usage": new_usage}}, upsert=True)
-                return True
-            except Exception:
-                self._using_fallback = True
-
-        # Fallback rate limiting
-        uid_str = str(user_id)
-        u = self._fallback._data["users"].setdefault(uid_str, {})
-        daily = u.setdefault("daily_usage", {"date": today, "resume": 0, "jobs": 0})
-        if daily.get("date") != today:
-            daily = {"date": today, "resume": 0, "jobs": 0}
-            u["daily_usage"] = daily
-
-        if daily.get(action, 0) >= limit:
-            return False
-
-        daily[action] = daily.get(action, 0) + 1
-        self._fallback._save()
+        """Rate limits disabled for personal use."""
         return True
 
     # ==================== User Profile ====================

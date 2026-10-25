@@ -77,10 +77,12 @@ class GeminiLLMClient(BaseLLMClient):
         contents.append({"role": "user", "parts": [{"text": prompt}]})
 
         payload = {"contents": contents}
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         if self.api_key.startswith("AQ."):
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            raise ValueError(
+                "GEMINI_API_KEY starting with 'AQ.' is an OAuth token, not a standard Google AI Studio key (starts with 'AIzaSy...')."
+            )
 
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{self.base_url}?key={self.api_key}",
@@ -130,10 +132,13 @@ class GeminiLLMClient(BaseLLMClient):
             "gemini-1.5-flash",
         ]))
 
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         if self.api_key.startswith("AQ."):
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            raise ValueError(
+                "GEMINI_API_KEY starting with 'AQ.' is an OAuth token, not a standard Google AI Studio key (starts with 'AIzaSy...'). "
+                "Falling back to local smart matcher."
+            )
 
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         async with httpx.AsyncClient(timeout=35.0) as client:
             last_err = None
             for m in candidate_models:

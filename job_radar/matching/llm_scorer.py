@@ -8,6 +8,13 @@ import re
 from typing import List, Optional
 from job_radar.llm import BaseLLMClient, get_llm_client
 from job_radar.models import Job, MatchResult, Preferences, UserProfile
+from job_radar.matching.prefilter import (
+    INDIA_LOCATIONS,
+    FOREIGN_COUNTRIES,
+    INDIA_LOCATION_REGEX,
+    FOREIGN_LOCATION_REGEX,
+    CONFLICTING_STACKS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +37,8 @@ Job Details:
 
 Evaluate the match between 0 and 100 based on technical skill alignment, domain fit, and seniority expectations.
 Important Rules:
-- If candidate is a College Student seeking an Internship: strongly prioritize intern, trainee, co-op, or student roles (score 80-95). Strictly score senior/lead roles below 40.
-- If required skills are largely missing, score below 60.
+- If candidate is a Fresher or College Student: strictly score Senior, Staff, Lead, Architect, or Owner/CRO positions below 40.
+- If candidate specializes in ML/AI/Data and the job is unrelated (e.g. Ruby backend, Hardware, Sales), score below 50.
 - If it's a solid match for their skills and experience level, score 75-95.
 
 Return JSON in this exact structure:
@@ -43,13 +50,13 @@ Return JSON in this exact structure:
 """
 
 ROLE_SYNONYMS = {
-    "ml": ["machine learning", "ml", "ai", "artificial intelligence", "deep learning", "nlp", "computer vision", "llm", "generative ai", "data science"],
-    "ai": ["machine learning", "ml", "ai", "artificial intelligence", "deep learning", "nlp", "llm"],
+    "ml": ["machine learning", "ml", "ai", "artificial intelligence", "deep learning", "nlp", "computer vision", "llm", "generative ai", "data science", "mlops"],
+    "ai": ["machine learning", "ml", "ai", "artificial intelligence", "deep learning", "nlp", "llm", "genai"],
     "data scientist": ["data science", "data scientist", "machine learning", "analytics", "modeling"],
-    "data analyst": ["data analyst", "data analytics", "business intelligence", "bi", "analytics", "sql", "tableau", "power bi"],
-    "backend": ["backend", "back-end", "python", "api", "django", "fastapi", "flask", "server", "microservices", "software engineer"],
-    "full stack": ["full stack", "fullstack", "frontend", "front-end", "react", "node", "web developer", "software engineer"],
-    "frontend": ["frontend", "front-end", "react", "vue", "angular", "ui", "javascript", "typescript"],
+    "data analyst": ["data analyst", "data analytics", "business intelligence", "bi", "analytics", "sql"],
+    "backend": ["backend", "back-end", "python", "api", "django", "fastapi", "flask", "server", "microservices"],
+    "full stack": ["full stack", "fullstack", "frontend", "front-end", "react", "node", "software engineer"],
+    "frontend": ["frontend", "front-end", "react", "vue", "angular", "ui", "javascript"],
     "software": ["software engineer", "software developer", "sde", "swe", "developer"],
 }
 
@@ -80,12 +87,11 @@ def compute_smart_match(
     exp_type = preferences.experience_type if preferences else getattr(profile, "experience_level", "fresher")
     exp_type = (exp_type or "fresher").lower()
 
-    target_roles = list(dict.fromkeys(
-        (preferences.roles if preferences and preferences.roles else []) +
-        (profile.preferred_roles or [])
-    ))
-    if not target_roles:
-        target_roles = ["Software Engineer", "Machine Learning", "Data Analyst"]
+    # Strictly prioritize user's active preferences.roles
+    if preferences and preferences.roles:
+        target_roles = preferences.roles
+    else:
+        target_roles = profile.preferred_roles or ["Machine Learning Engineer", "Software Engineer"]
 
     user_skills = list(dict.fromkeys(
         (profile.skills or []) +
@@ -101,7 +107,7 @@ def compute_smart_match(
         re.search(r"\b(junior|jr\.?|associate|entry[- ]level|graduate|fresher|engineer i\b)\b", title_lower)
     )
     is_senior_job = bool(
-        re.search(r"\b(senior|sr\.?|lead|staff|principal|director|manager|architect|head of|vp)\b", title_lower)
+        re.search(r"\b(senior|sr\.?|lead|staff|principal|director|manager|architect|head of|vp|owner|cro|cxo|chief|executive|distinguished|partner)\b", title_lower)
     )
 
     seniority_score = 15
@@ -109,21 +115,21 @@ def compute_smart_match(
     if exp_type == "internship":
         status_label = "Internship"
         if is_intern_job:
-            seniority_score = 30  # Max bonus for student internship
+            seniority_score = 30
         elif is_junior_job and not is_senior_job:
             seniority_score = 22
         elif is_senior_job:
-            seniority_score = 0   # Heavy penalty for senior job when student
+            seniority_score = 0
         else:
             seniority_score = 15
     elif exp_type == "fresher":
         status_label = "Fresher / Graduate"
-        if is_junior_job or is_intern_job:
+        if is_senior_job:
+            seniority_score = 0
+        elif is_junior_job or is_intern_job:
             seniority_score = 30
-        elif not is_senior_job:
-            seniority_score = 24
         else:
-            seniority_score = 5
+            seniority_score = 20
     elif exp_type in ("mid", "experienced"):
         status_label = "Mid-Level"
         if not is_intern_job and not is_senior_job:
@@ -140,36 +146,43 @@ def compute_smart_match(
             seniority_score = 15
 
     # --- 2. Role Title & Category Alignment (0 - 35 points) ---
-    title_score = 12
+    title_score = 0
     best_role_match = target_roles[0] if target_roles else "Target Role"
 
-    for role in target_roles:
-        r_clean = role.lower().strip()
-        # Direct substring
-        if r_clean in title_lower:
-            title_score = 35
-            best_role_match = role
-            break
-
-        # Check synonyms
-        synonyms = [r_clean]
-        for key, syn_list in ROLE_SYNONYMS.items():
-            if key in r_clean:
-                synonyms.extend(syn_list)
-
-        matched_syn = False
-        for syn in synonyms:
-            if re.search(r"\b" + re.escape(syn) + r"\b", title_lower):
-                title_score = max(title_score, 30)
-                best_role_match = role
-                matched_syn = True
+    cand_skills_lower = {s.lower().strip() for s in user_skills}
+    has_conflict = False
+    for tech_name, syns in CONFLICTING_STACKS.items():
+        if any(f"({s})" in title_lower or f": {s}" in title_lower or f" {s} " in f" {title_lower} " for s in syns):
+            if not any(s in cand_skills_lower for s in syns):
+                has_conflict = True
                 break
-            elif re.search(r"\b" + re.escape(syn) + r"\b", desc_sample):
-                title_score = max(title_score, 22)
-                best_role_match = role
 
-        if matched_syn:
-            break
+    if not has_conflict:
+        for role in target_roles:
+            r_clean = role.lower().strip()
+            if r_clean in title_lower:
+                title_score = 35
+                best_role_match = role
+                break
+
+            synonyms = [r_clean]
+            for key, syn_list in ROLE_SYNONYMS.items():
+                if key in r_clean:
+                    synonyms.extend(syn_list)
+
+            matched_syn = False
+            for syn in synonyms:
+                if re.search(r"\b" + re.escape(syn) + r"\b", title_lower):
+                    title_score = max(title_score, 30)
+                    best_role_match = role
+                    matched_syn = True
+                    break
+                elif re.search(r"\b" + re.escape(syn) + r"\b", desc_sample):
+                    title_score = max(title_score, 20)
+                    best_role_match = role
+
+            if matched_syn:
+                break
 
     # --- 3. Skill Overlap & Missing Skills (0 - 25 points) ---
     matched_skills = []
@@ -181,47 +194,60 @@ def compute_smart_match(
         if re.search(pat, job_text):
             matched_skills.append(s_clean)
 
-    # Missing skills detection
     user_skills_set = {s.lower() for s in user_skills}
     missing_skills = []
     for tech in COMMON_TECH_CATALOG:
         if tech.lower() in job_text and tech.lower() not in user_skills_set:
             missing_skills.append(tech)
 
-    # Skill score based on count
     n_matches = len(matched_skills)
     if n_matches >= 4:
         skill_score = 25
     elif n_matches == 3:
         skill_score = 20
     elif n_matches == 2:
-        skill_score = 16
+        skill_score = 15
     elif n_matches == 1:
-        skill_score = 12
+        skill_score = 10
     else:
-        skill_score = 6
+        skill_score = 5
 
     # --- 4. Location & Work Mode Fit (0 - 10 points) ---
-    loc_score = 6
+    loc_score = 4
     job_loc_lower = (job.location or "").lower()
-    is_remote = "remote" in job_loc_lower or job.work_mode.lower() == "remote"
-    pref_locs = [l.lower() for l in (preferences.locations if preferences else ["remote"])]
+    job_country_lower = (job.country or "").lower()
+    pref_locs = [l.lower() for l in (preferences.locations if preferences else ["india", "remote"])]
 
-    if any("remote" in p for p in pref_locs) and is_remote:
-        loc_score = 10
-    elif any("india" in p for p in pref_locs) and ("india" in job_loc_lower or is_remote):
-        loc_score = 10
-    elif any(p in job_loc_lower for p in pref_locs if len(p) > 2):
+    job_in_india = (
+        job_country_lower in ("in", "india")
+        or bool(INDIA_LOCATION_REGEX.search(job_loc_lower))
+    )
+    has_foreign_restriction = bool(FOREIGN_LOCATION_REGEX.search(job_loc_lower))
+
+    user_wants_india = any(
+        p.lower() in ("india", "in") or bool(INDIA_LOCATION_REGEX.search(p))
+        for p in pref_locs
+    )
+
+    if user_wants_india:
+        if job_in_india:
+            loc_score = 10
+        elif has_foreign_restriction:
+            loc_score = 0
+        else:
+            loc_score = 6
+    elif any("remote" in p for p in pref_locs) and not has_foreign_restriction:
         loc_score = 10
 
-    # Total Score
-    total_score = min(98, max(35, seniority_score + title_score + skill_score + loc_score))
+    # Total Score Calculation
+    total_score = min(98, max(25, seniority_score + title_score + skill_score + loc_score))
 
     # Clean explanation
-    skills_preview = ", ".join(matched_skills[:3]) if matched_skills else "core technical foundation"
+    skills_preview = ", ".join(matched_skills[:3]) if matched_skills else "core foundational skills"
+    location_desc = "India" if job_in_india else ("Remote" if not has_foreign_restriction else job.location)
     why_text = (
-        f"🎯 Strong match for {best_role_match} ({status_label}). "
-        f"Alongs with your skills in {skills_preview}."
+        f"Strong match for {best_role_match} ({status_label}). "
+        f"Aligns with your skills in {skills_preview} | Location: {location_desc}."
     )
 
     return MatchResult(
@@ -321,6 +347,5 @@ async def score_jobs_with_llm(
         else:
             logger.error(f"Error in job scoring task: {res}")
 
-    # Sort descending by match score
     passed.sort(key=lambda m: m.score, reverse=True)
     return passed

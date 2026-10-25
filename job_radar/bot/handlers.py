@@ -220,14 +220,6 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user or not check_access(user.id):
         return
 
-    # Check rate limit
-    if not store.check_and_increment_rate_limit(user.id, "jobs"):
-        await update.message.reply_text(
-            "⏳ You have reached your daily limit for on-demand searches. "
-            "Your automatic 2-hour job updates will still arrive as scheduled!"
-        )
-        return
-
     status_msg = await update.message.reply_text("🔍 Scanning job boards & matching against your profile...")
 
     try:
@@ -392,10 +384,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if not check_access(user.id):
         await update.message.reply_text("⛔ Restricted access.")
-        return
-
-    if not store.check_and_increment_rate_limit(user.id, "resume"):
-        await update.message.reply_text("⏳ You have reached your daily resume upload limit (5/day).")
         return
 
     filename = doc.file_name or "resume.pdf"

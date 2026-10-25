@@ -38,21 +38,40 @@ async def fetch_all_jobs(
     query: Optional[str] = None,
 ) -> List[Job]:
     """
-    Fetch jobs from all sources concurrently.
+    Fetch jobs from all sources concurrently with targeted country and domain queries.
     Per-source try/except ensures one failing source never halts the run.
     """
-    src_list = sources if sources is not None else get_default_sources()
-    logger.info(f"Starting job ingestion from {len(src_list)} sources...")
+    if sources is not None:
+        tasks = [s.fetch_jobs(query=query) for s in sources]
+    else:
+        freehire = FreehireSource()
+        greenhouse = GreenhouseSource()
+        lever = LeverSource()
+        ashby = AshbySource()
 
-    tasks = [s.fetch_jobs(query=query) for s in src_list]
+        tasks = [
+            # 1. Dedicated India tech hub jobs
+            freehire.fetch_jobs(country="IN", limit=60),
+            # 2. Targeted role streams
+            freehire.fetch_jobs(query="machine learning", limit=40),
+            freehire.fetch_jobs(query="ai", limit=40),
+            freehire.fetch_jobs(query="python", limit=40),
+            freehire.fetch_jobs(query="data", limit=40),
+            freehire.fetch_jobs(query="intern", limit=40),
+            # 3. Direct ATS boards
+            greenhouse.fetch_jobs(query=query),
+            lever.fetch_jobs(query=query),
+            ashby.fetch_jobs(query=query),
+        ]
+
+    logger.info("Starting targeted job ingestion across sources...")
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     combined_jobs: List[Job] = []
-    for src, res in zip(src_list, results):
+    for res in results:
         if isinstance(res, Exception):
-            logger.error(f"Source '{src.name}' failed with error: {res}")
+            logger.error(f"Job fetch task error: {res}")
         elif isinstance(res, list):
-            logger.info(f"Source '{src.name}' returned {len(res)} jobs.")
             combined_jobs.extend(res)
 
     # Global deduplication across all sources
