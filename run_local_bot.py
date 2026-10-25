@@ -1,11 +1,17 @@
-"""Run JobRadar Telegram Bot locally in long-polling mode with full debug logging and error handling."""
+"""Run JobRadar Telegram Bot locally in long-polling mode with 2-hour scheduled delivery."""
 
+from __future__ import annotations
+
+import asyncio
+import html
 import logging
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 from telegram.request import HTTPXRequest
 
 from job_radar.config import settings
+from job_radar.store import store
+from job_radar.jobs_pipeline import fetch_all_jobs, process_and_deliver_jobs_for_user
 from job_radar.bot.handlers import register_handlers
 
 logging.basicConfig(
@@ -14,8 +20,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger("local_bot")
 
+TWO_HOURS_IN_SECONDS = 7200  # 2 hours interval
 
-import html
+
+async def periodic_job_radar_loop(app: Application, interval_seconds: int = TWO_HOURS_IN_SECONDS) -> None:
+    """
+    Background worker that runs every 2 hours:
+    1. Scans job boards (freehire.me, greenhouse, lever, ashby).
+    2. Runs multi-factor matching against candidate preferences & resume.
+    3. Delivers fresh, new unseen direct openings to each active user.
+    """
+    logger.info(f"⏰ Initialized 2-Hour JobRadar periodic loop (interval: {interval_seconds}s).")
+    # Initial grace delay after bot startup before the first automated check
+    await asyncio.sleep(20)
+
+    while True:
+        try:
+            active_uids = store.get_active_users()
+            eligible_users = []
+            for uid in active_uids:
+                profile = store.get_profile(uid)
+                prefs = store.get_preferences(uid)
+                if profile and prefs.onboarding_completed and not prefs.is_paused:
+                    eligible_users.append(uid)
+
+            if eligible_users:
+                logger.info(f"⏰ [2-Hour Periodic JobRadar] Scanning openings for {len(eligible_users)} active user(s)...")
+                candidate_jobs = await fetch_all_jobs()
+
+                for uid in eligible_users:
+                    try:
+                        matches = await process_and_deliver_jobs_for_user(
+                            user_id=uid,
+                            candidate_jobs=candidate_jobs,
+                            bot=app.bot,
+                            force=False,
+                            is_periodic=True,
+                        )
+                        if matches:
+                            logger.info(f"⏰ Delivered {len(matches)} new matching jobs to user {uid}.")
+                    except Exception as err:
+                        logger.error(f"Error delivering periodic jobs to user {uid}: {err}", exc_info=True)
+            else:
+                logger.info("⏰ [2-Hour Periodic JobRadar] No active users with completed profile. Waiting for next cycle.")
+
+        except Exception as e:
+            logger.error(f"Error in periodic_job_radar_loop cycle: {e}", exc_info=True)
+
+        logger.info(f"⏰ [2-Hour Periodic JobRadar] Cycle completed. Sleeping for {interval_seconds}s...")
+        await asyncio.sleep(interval_seconds)
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -33,11 +86,16 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 
 async def on_startup(app: Application) -> None:
+    """Invoked when the Telegram application has initialized."""
     me = await app.bot.get_me()
     print("======================================================")
     print(f"✅ CONNECTED TO BOT: @{me.username} ({me.first_name})")
     print(f"👉 OPEN THIS LINK IN TELEGRAM: https://t.me/{me.username}")
+    print("⏰ Periodic 2-hour job matcher: ACTIVE")
     print("======================================================")
+
+    # Launch periodic 2-hour matching worker in background
+    asyncio.create_task(periodic_job_radar_loop(app, interval_seconds=TWO_HOURS_IN_SECONDS))
 
 
 def main():
@@ -67,7 +125,7 @@ def main():
     register_handlers(application)
     application.add_error_handler(global_error_handler)
 
-    # Process all pending updates
+    # Process pending updates and start polling
     application.run_polling(drop_pending_updates=False)
 
 

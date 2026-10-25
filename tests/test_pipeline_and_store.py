@@ -94,6 +94,9 @@ class InMemoryTestStore(MongoStore):
     def __init__(self):
         self.uri = "mock://"
         self.db_name = "test_radar"
+        self._using_fallback = False
+        from job_radar.store import LocalStoreFallback
+        self._fallback = LocalStoreFallback(filepath=".test_store_mock.json")
         self._collections = {
             "users": InMemoryMongoCollection(),
             "profiles": InMemoryMongoCollection(),

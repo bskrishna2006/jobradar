@@ -73,6 +73,7 @@ async def process_and_deliver_jobs_for_user(
     candidate_jobs: List[Job],
     bot: Any,
     force: bool = False,
+    is_periodic: bool = False,
     dry_run: Optional[bool] = None,
 ) -> List[MatchResult]:
     """
@@ -123,10 +124,11 @@ async def process_and_deliver_jobs_for_user(
     ranked_top = await rank_jobs_by_embedding(prefiltered, profile, top_n=25)
     top_candidates = [job for job, _ in ranked_top]
 
-    # 5. Stage 2: LLM scoring
+    # 5. Stage 2: Fit scoring (LLM with smart multi-factor fallback)
     scored_matches = await score_jobs_with_llm(
         top_candidates,
         profile=profile,
+        preferences=prefs,
         min_score=prefs.min_score,
     )
     logger.info(f"User {user_id}: {len(scored_matches)} jobs scored >= {prefs.min_score}%.")
@@ -154,10 +156,16 @@ async def process_and_deliver_jobs_for_user(
 
     try:
         # Summary intro message
-        summary_text = (
-            f"🎯 <b>Found {len(digest_matches)} new job matches for you!</b>\n"
-            f"<i>Ranked by AI match against your resume:</i>"
-        )
+        if is_periodic:
+            summary_text = (
+                f"⏰ <b>JobRadar 2-Hour Alert</b>\n\n"
+                f"🎯 Found <b>{len(digest_matches)}</b> new opening(s) matching your profile:"
+            )
+        else:
+            summary_text = (
+                f"🎯 <b>Found {len(digest_matches)} new job matches for you!</b>\n"
+                f"<i>Ranked by AI match against your profile & preferences:</i>"
+            )
         await bot.send_message(chat_id=user_id, text=summary_text, parse_mode="HTML")
 
         # Deliver each job message with action buttons

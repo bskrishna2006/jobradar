@@ -1,4 +1,4 @@
-"""Telegram bot command, message, document, and callback handlers."""
+"""Telegram bot command, message, document, and callback handlers with interactive onboarding."""
 
 from __future__ import annotations
 
@@ -11,12 +11,13 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from job_radar.config import settings
 from job_radar.store import store
-from job_radar.models import Preferences, Job
+from job_radar.models import Preferences, Job, UserProfile
 from job_radar.profile.resume_parser import (
     validate_resume_file,
     extract_text_from_bytes,
@@ -36,7 +37,7 @@ from job_radar.bot.formatting import (
 
 logger = logging.getLogger(__name__)
 
-# State tracking for text inputs (roles, locations, skills)
+# State tracking for text inputs (roles, locations, skills, onboarding)
 USER_INPUT_STATE = {}
 
 
@@ -48,10 +49,54 @@ def check_access(user_id: int) -> bool:
     return user_id in allowed
 
 
+def get_exp_label(exp_type: str) -> str:
+    labels = {
+        "internship": "🎓 College Student (Seeking Internship)",
+        "fresher": "🚀 Fresher / Graduate (0-1 YOE)",
+        "mid": "💼 Experienced (1-3 YOE)",
+        "senior": "👑 Senior / Lead (4+ YOE)",
+    }
+    return labels.get(exp_type, exp_type.capitalize())
+
+
+def get_step1_experience_keyboard() -> InlineKeyboardMarkup:
+    """Question 1: Experience & Student status keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("🎓 College Student (Seeking Internship)", callback_data="onb:status:internship")],
+        [InlineKeyboardButton("🚀 Fresher / Graduate (0-1 YOE)", callback_data="onb:status:fresher")],
+        [InlineKeyboardButton("💼 Working Professional (1-3 YOE)", callback_data="onb:status:mid")],
+        [InlineKeyboardButton("👑 Senior / Lead (4+ YOE)", callback_data="onb:status:senior")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_step2_roles_keyboard() -> InlineKeyboardMarkup:
+    """Question 2: Target roles keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("🤖 ML & AI Engineer", callback_data="onb:role:ml_ai")],
+        [InlineKeyboardButton("📊 Data Scientist / Analyst", callback_data="onb:role:data")],
+        [InlineKeyboardButton("⚙️ Python Backend Developer", callback_data="onb:role:backend")],
+        [InlineKeyboardButton("🌐 Full Stack / Software Engineer", callback_data="onb:role:fullstack")],
+        [InlineKeyboardButton("✏️ Type Custom Role(s)", callback_data="onb:role:custom")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_step3_location_keyboard() -> InlineKeyboardMarkup:
+    """Question 3: Preferred locations keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("🌍 100% Remote (Worldwide)", callback_data="onb:loc:remote")],
+        [InlineKeyboardButton("🇮🇳 India Tech Hubs (Bengaluru, Hyd, etc.)", callback_data="onb:loc:india")],
+        [InlineKeyboardButton("🤝 Remote + India", callback_data="onb:loc:remote_india")],
+        [InlineKeyboardButton("✏️ Type Custom Location", callback_data="onb:loc:custom")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 # ==================== Command Handlers ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command."""
+    """Handle /start command with interactive onboarding or dashboard."""
     user = update.effective_user
     if not user:
         return
@@ -64,22 +109,57 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         store.upsert_user(user.id, username=user.username or "", first_name=user.first_name or "")
-        # Ensure default preferences exist
-        store.get_preferences(user.id)
+        prefs = store.get_preferences(user.id)
     except Exception as e:
-        logger.warning(f"Could not persist user to MongoDB in /start: {e}")
+        logger.warning(f"Could not initialize user store in /start: {e}")
+        prefs = Preferences(user_id=user.id)
 
+    profile = store.get_profile(user.id)
+
+    # If user has already completed onboarding and has a profile: show active dashboard
+    if prefs.onboarding_completed and profile:
+        exp_title = get_exp_label(prefs.experience_type)
+        roles_str = ", ".join(prefs.roles) or "General"
+        locs_str = ", ".join(prefs.locations) or "Remote, India"
+
+        text = (
+            f"👋 <b>Welcome back to JobRadar, {user.first_name}!</b>\n\n"
+            f"✅ <b>Status:</b> {exp_title}\n"
+            f"🎯 <b>Target Roles:</b> {roles_str}\n"
+            f"📍 <b>Preferred Locations:</b> {locs_str}\n"
+            f"⏰ <b>Scheduled Alerts:</b> Every 2 hours\n\n"
+            "What would you like to do?"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("🔍 Find Matching Jobs Now 🚀", callback_data="action:find_jobs_now"),
+            ],
+            [
+                InlineKeyboardButton("📄 View Profile", callback_data="action:view_profile"),
+                InlineKeyboardButton("⚙️ Preferences", callback_data="action:view_prefs"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Retake Questionnaire", callback_data="onb:restart"),
+            ],
+        ]
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Start interactive onboarding
     welcome_text = (
         f"👋 <b>Welcome to JobRadar, {user.first_name}!</b>\n\n"
-        "I am your personal AI job-finding assistant. Every day, I scan fresh openings from "
+        "I am your personal AI job-finding assistant. I scan verified openings across "
         "<b>freehire.me</b>, <b>Greenhouse</b>, <b>Lever</b>, and <b>Ashby</b>, match them to your skills, "
-        "and send you the best direct application links.\n\n"
-        "🛡️ <i>Note: I only discover and recommend high-match jobs. I NEVER auto-apply or fill forms.</i>\n\n"
-        "🚀 <b>To get started:</b>\n"
-        "Please send me your resume as a <b>PDF, DOCX, or TXT</b> file (max 5 MB). "
-        "I will extract your skills and build your matching profile!"
+        "and send direct opportunities every 2 hours.\n\n"
+        "🛡️ <i>Note: I only discover and recommend direct openings. I NEVER auto-apply or spam.</i>\n\n"
+        "Let's set up your profile in 3 quick questions!\n\n"
+        "<b>Step 1 of 3: What is your current experience status?</b>"
     )
-    await update.message.reply_text(welcome_text, parse_mode="HTML")
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=get_step1_experience_keyboard(),
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -88,19 +168,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     help_text = (
-        "🤖 <b>JobRadar Commands</b>\n\n"
-        "/start - Welcome & resume upload prompt\n"
+        "🤖 <b>JobRadar Commands & Guide</b>\n\n"
+        "/start - Welcome, interactive questionnaire & setup\n"
+        "/jobs - Scan and deliver new matching jobs right now\n"
         "/profile - View your parsed profile & extracted skills\n"
         "/preferences - View & edit roles, locations, score & digest settings\n"
-        "/jobs - Scan and deliver new matching jobs right now\n"
-        "/applied - View your applied jobs list\n"
+        "/applied - View your applied jobs tracker\n"
         "/stats - Application metrics (sent, saved, applied, skipped)\n"
         "/prep &lt;company&gt; - AI interview prep (technical Qs, DSA, resume questions)\n"
-        "/pause - Pause your daily job digest\n"
-        "/resume - Resume your daily job digest\n"
+        "/pause - Pause automated 2-hour job alerts\n"
+        "/resume - Resume automated 2-hour job alerts\n"
         "/deleteme - Permanently purge your profile and all stored data\n"
         "/help - Show this guide\n\n"
-        "📎 <i>To update your resume, simply upload a new document file at any time!</i>"
+        "📎 <i>To update your resume, simply upload a PDF, DOCX, or TXT file at any time!</i>"
     )
     await update.message.reply_text(help_text, parse_mode="HTML")
 
@@ -143,18 +223,18 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Check rate limit
     if not store.check_and_increment_rate_limit(user.id, "jobs"):
         await update.message.reply_text(
-            "⏳ You have reached your daily limit for /jobs on-demand searches. "
-            "Your automatic daily digest will still arrive as scheduled!"
+            "⏳ You have reached your daily limit for on-demand searches. "
+            "Your automatic 2-hour job updates will still arrive as scheduled!"
         )
         return
 
-    status_msg = await update.message.reply_text("🔍 Scanning job boards & matching against your resume...")
+    status_msg = await update.message.reply_text("🔍 Scanning job boards & matching against your profile...")
 
     try:
         jobs = await fetch_all_jobs()
         await process_and_deliver_jobs_for_user(user.id, jobs, bot=context.bot, force=True)
     except Exception as e:
-        logger.error(f"Error during /jobs for user {user.id}: {e}")
+        logger.error(f"Error during /jobs for user {user.id}: {e}", exc_info=True)
         await update.message.reply_text(f"❌ An error occurred while finding jobs: {e}")
     finally:
         try:
@@ -210,7 +290,7 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     prefs = store.get_preferences(user.id)
     prefs.is_paused = True
     store.save_preferences(prefs)
-    await update.message.reply_text("⏸ Daily job digests paused. Use /resume when you're ready to restart!")
+    await update.message.reply_text("⏸ Automated job alerts paused. Use /resume when you're ready to restart!")
 
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,7 +302,7 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     prefs = store.get_preferences(user.id)
     prefs.is_paused = False
     store.save_preferences(prefs)
-    await update.message.reply_text("▶️ Daily job digests resumed! You will receive your daily recommendations.")
+    await update.message.reply_text("▶️ Automated job alerts resumed! You will receive updates every 2 hours.")
 
 
 async def prep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -238,51 +318,33 @@ async def prep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     query = " ".join(context.args).strip() if context.args else ""
     if not query:
-        # Check user's recently saved/applied jobs
         recent_records = store.get_applied_jobs(user.id, limit=5)
         if recent_records:
             comps = ", ".join(r.get("company_name", "") for r in recent_records if r.get("company_name"))
             await update.message.reply_text(
                 f"💡 Usage: <code>/prep &lt;company_name&gt;</code>\n"
-                f"Example: <code>/prep {recent_records[0].get('company_name', 'Stripe')}</code>\n"
+                f"Example: <code>/prep {recent_records[0].get('company_name', 'Google')}</code>\n"
                 f"Recent companies: {comps}",
                 parse_mode="HTML",
             )
         else:
             await update.message.reply_text(
-                "💡 Usage: <code>/prep &lt;company_name&gt;</code>\nExample: <code>/prep Stripe</code>",
+                "💡 Usage: <code>/prep &lt;company_name&gt;</code>\nExample: <code>/prep Google</code>",
                 parse_mode="HTML",
             )
         return
 
     status_msg = await update.message.reply_text(f"🧠 Generating interview prep for <b>{query}</b>...", parse_mode="HTML")
 
-    # Look up job in user_jobs or seen_jobs
-    job_record = store.db.seen_jobs.find_one({"company": {"$regex": f"^{query}", "$options": "i"}})
-    if not job_record:
-        job_record = store.db.seen_jobs.find_one({"title": {"$regex": query, "$options": "i"}})
-
-    if job_record:
-        job = Job(
-            id=job_record.get("job_id", f"query:{query}"),
-            source=job_record.get("source", "freehire"),
-            title=job_record.get("title", f"{query} Engineer"),
-            company=job_record.get("company", query),
-            location=job_record.get("location", "Remote"),
-            url=job_record.get("url", ""),
-            description=job_record.get("description", f"Role at {query}"),
-        )
-    else:
-        # Synthesize role context for query
-        job = Job(
-            id=f"query:{query}",
-            source="custom",
-            title=f"{query} Engineering Role",
-            company=query,
-            location="Remote",
-            url="",
-            description=f"Software engineering and machine learning position at {query}.",
-        )
+    job = Job(
+        id=f"query:{query}",
+        source="custom",
+        title=f"{query} Engineering Role",
+        company=query,
+        location="Remote",
+        url="",
+        description=f"Software engineering and machine learning position at {query}.",
+    )
 
     prep_data = await generate_interview_prep(job, profile)
     prep_msg = format_interview_prep(job.title, job.company, prep_data)
@@ -322,7 +384,7 @@ async def deleteme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ==================== Document (Resume) Handler ====================
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle resume file uploads (PDF, DOCX, TXT)."""
+    """Handle resume file uploads (PDF, DOCX, TXT) and combine with questionnaire."""
     user = update.effective_user
     doc = update.message.document
     if not user or not doc:
@@ -332,7 +394,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("⛔ Restricted access.")
         return
 
-    # Check rate limit
     if not store.check_and_increment_rate_limit(user.id, "resume"):
         await update.message.reply_text("⏳ You have reached your daily resume upload limit (5/day).")
         return
@@ -346,28 +407,59 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"❌ {e}")
         return
 
-    status_msg = await update.message.reply_text("📥 Downloading & analyzing your resume with AI...")
+    status_msg = await update.message.reply_text("📥 Analyzing your resume and integrating with your preferences...")
 
     try:
-        # Download file bytes via Telegram getFile API
         tg_file = await doc.get_file()
         file_bytes = await tg_file.download_as_bytearray()
 
-        # Extract text (never logged)
         extracted_text = extract_text_from_bytes(bytes(file_bytes), filename)
-
-        # Parse into structured profile
         profile = await parse_resume_to_profile(user.id, extracted_text)
 
-        # Store profile (replaces old profile if user uploads a new one)
+        # Merge with onboarding questionnaire preferences
+        prefs = store.get_preferences(user.id)
+        if prefs.experience_type == "internship":
+            profile.experience_level = "internship"
+            profile.years_of_experience = 0.0
+        elif prefs.experience_type == "fresher":
+            profile.experience_level = "entry-level"
+        elif prefs.experience_type == "mid":
+            profile.experience_level = "mid-level"
+        elif prefs.experience_type == "senior":
+            profile.experience_level = "senior"
+
+        # Combine preferred roles
+        profile.preferred_roles = list(dict.fromkeys((prefs.roles or []) + profile.preferred_roles))
+
+        # Mark onboarding as complete
+        prefs.onboarding_completed = True
+        store.save_preferences(prefs)
         store.save_profile(profile)
 
         summary_text = format_profile_summary(profile)
+        exp_title = get_exp_label(prefs.experience_type)
+        roles_str = ", ".join(prefs.roles) or "General"
+        locs_str = ", ".join(prefs.locations) or "Remote, India"
+
+        ready_message = (
+            "🎉 <b>Profile & Preferences Setup Complete!</b>\n\n"
+            f"🎓 <b>Target Status:</b> {exp_title}\n"
+            f"🎯 <b>Target Roles:</b> {roles_str}\n"
+            f"📍 <b>Locations:</b> {locs_str}\n"
+            f"⏰ <b>Alert Frequency:</b> Every 2 hours\n\n"
+            f"{summary_text}\n\n"
+            "🚀 <b>You are all set!</b> Tap below to run your first match scan now, "
+            "or wait for your scheduled 2-hour updates."
+        )
+
         keyboard = [
             [
-                InlineKeyboardButton("Looks good! ✅", callback_data="profile_ok"),
-                InlineKeyboardButton("Upload again 🔄", callback_data="profile_reupload"),
-            ]
+                InlineKeyboardButton("🚀 Find Matching Jobs Now", callback_data="action:find_jobs_now"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Edit Preferences", callback_data="action:view_prefs"),
+                InlineKeyboardButton("🔄 Upload New Resume", callback_data="profile_reupload"),
+            ],
         ]
 
         try:
@@ -376,13 +468,13 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
 
         await update.message.reply_text(
-            f"🎉 <b>Resume analyzed successfully!</b>\n\n{summary_text}",
+            ready_message,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     except Exception as e:
-        logger.error(f"Resume parsing error for user {user.id}: {e}")
+        logger.error(f"Resume parsing error for user {user.id}: {e}", exc_info=True)
         await update.message.reply_text(
             f"❌ Could not process resume: {e}\n"
             "Please make sure the file is a clean text-based PDF, DOCX, or TXT file."
@@ -392,7 +484,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ==================== Callback Query Handler ====================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline button clicks."""
+    """Handle inline button clicks for onboarding, job actions, and preferences."""
     query = update.callback_query
     if not query or not query.data:
         return
@@ -400,6 +492,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     data = query.data
     user_id = query.from_user.id
+    prefs = store.get_preferences(user_id)
 
     # 1. Job action buttons: act:applied:{job_id}, act:saved:{job_id}, act:skipped:{job_id}
     if data.startswith("act:"):
@@ -409,10 +502,148 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         toast = f"Marked as {action_emojis.get(action, action)}!"
         await query.answer(toast, show_alert=False)
 
-    # 2. Preference modifications
+    # 2. Onboarding: Step 1 (Status & Experience Level)
+    elif data.startswith("onb:status:"):
+        status_key = data.split(":", 2)[2]
+        prefs.experience_type = status_key
+        if status_key == "internship":
+            prefs.years_of_experience = 0.0
+            prefs.experience_level = "internship"
+        elif status_key == "fresher":
+            prefs.years_of_experience = 0.5
+            prefs.experience_level = "entry-level"
+        elif status_key == "mid":
+            prefs.years_of_experience = 2.0
+            prefs.experience_level = "mid-level"
+        elif status_key == "senior":
+            prefs.years_of_experience = 5.0
+            prefs.experience_level = "senior"
+
+        store.save_preferences(prefs)
+        exp_label = get_exp_label(status_key)
+
+        step2_text = (
+            f"✅ <b>Status saved:</b> {exp_label}\n\n"
+            "<b>Step 2 of 3: What job roles are you looking for?</b>\n"
+            "Select your primary track or choose 'Custom' to specify your own:"
+        )
+        await query.edit_message_text(
+            step2_text,
+            parse_mode="HTML",
+            reply_markup=get_step2_roles_keyboard(),
+        )
+
+    # 3. Onboarding: Step 2 (Roles)
+    elif data.startswith("onb:role:"):
+        role_key = data.split(":", 2)[2]
+        if role_key == "custom":
+            USER_INPUT_STATE[user_id] = "onb_custom_role"
+            await query.message.reply_text(
+                "✏️ Please type your desired target roles as a comma-separated list:\n"
+                "<i>Example: Machine Learning Engineer, NLP Engineer, Python Developer</i>",
+                parse_mode="HTML",
+            )
+            return
+
+        role_presets = {
+            "ml_ai": ["Machine Learning Engineer", "AI Engineer", "MLOps Engineer"],
+            "data": ["Data Scientist", "Data Analyst", "Business Intelligence"],
+            "backend": ["Python Backend Engineer", "Software Engineer", "Backend Developer"],
+            "fullstack": ["Full Stack Engineer", "Software Engineer", "Frontend Developer"],
+        }
+        chosen_roles = role_presets.get(role_key, ["Software Engineer"])
+        prefs.roles = chosen_roles
+        store.save_preferences(prefs)
+
+        step3_text = (
+            f"✅ <b>Target roles saved:</b> {', '.join(chosen_roles)}\n\n"
+            "<b>Step 3 of 3: Where would you like to work?</b>"
+        )
+        await query.edit_message_text(
+            step3_text,
+            parse_mode="HTML",
+            reply_markup=get_step3_location_keyboard(),
+        )
+
+    # 4. Onboarding: Step 3 (Locations)
+    elif data.startswith("onb:loc:"):
+        loc_key = data.split(":", 2)[2]
+        if loc_key == "custom":
+            USER_INPUT_STATE[user_id] = "onb_custom_loc"
+            await query.message.reply_text(
+                "✏️ Please type your desired job locations as a comma-separated list:\n"
+                "<i>Example: Remote, Bengaluru, Hyderabad, Singapore</i>",
+                parse_mode="HTML",
+            )
+            return
+
+        loc_presets = {
+            "remote": ["Remote"],
+            "india": ["India", "Bengaluru", "Hyderabad", "Pune", "Mumbai", "Noida", "Gurgaon"],
+            "remote_india": ["Remote", "India", "Bengaluru", "Hyderabad", "Pune"],
+        }
+        chosen_locs = loc_presets.get(loc_key, ["Remote", "India"])
+        prefs.locations = chosen_locs
+        store.save_preferences(prefs)
+
+        exp_label = get_exp_label(prefs.experience_type)
+        roles_label = ", ".join(prefs.roles)
+
+        step4_text = (
+            f"✅ <b>Location preferences saved:</b> {', '.join(chosen_locs)}\n\n"
+            "🎉 <b>Questionnaire Complete!</b>\n\n"
+            "📄 <b>Final Step: Upload Your Resume</b>\n"
+            "Please send your resume file here as a <b>PDF, DOCX, or TXT</b> document.\n\n"
+            f"💡 <i>JobRadar will merge your answers ({exp_label}, {roles_label}) with your resume "
+            "skills, education, and projects to match you with top job openings!</i>"
+        )
+        await query.edit_message_text(step4_text, parse_mode="HTML")
+
+    # 5. Onboarding: Restart
+    elif data == "onb:restart":
+        welcome_text = (
+            "🔄 <b>Restarting Profile Setup</b>\n\n"
+            "<b>Step 1 of 3: What is your current experience status?</b>"
+        )
+        await query.edit_message_text(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=get_step1_experience_keyboard(),
+        )
+
+    # 6. Action buttons: Find jobs now, View Profile, View Preferences
+    elif data == "action:find_jobs_now":
+        status_msg = await query.message.reply_text("🔍 Scanning job boards & matching against your profile...")
+        try:
+            jobs = await fetch_all_jobs()
+            await process_and_deliver_jobs_for_user(user_id, jobs, bot=context.bot, force=True)
+        except Exception as e:
+            logger.error(f"Error in find_jobs_now for {user_id}: {e}", exc_info=True)
+            await query.message.reply_text(f"❌ Error finding jobs: {e}")
+        finally:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+    elif data == "action:view_profile":
+        profile = store.get_profile(user_id)
+        if profile:
+            await query.message.reply_text(format_profile_summary(profile), parse_mode="HTML")
+        else:
+            await query.message.reply_text("⚠️ No resume profile uploaded yet. Please send your resume file!")
+
+    elif data == "action:view_prefs":
+        updated_prefs = store.get_preferences(user_id)
+        await query.message.reply_text(
+            format_preferences_message(updated_prefs),
+            parse_mode="HTML",
+            reply_markup=get_preferences_keyboard(updated_prefs),
+        )
+
+    # 7. Preference settings modifications
     elif data.startswith("pref:"):
         action = data.split(":", 1)[1]
-        prefs = store.get_preferences(user_id)
 
         if action == "pause":
             prefs.is_paused = True
@@ -431,7 +662,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             prefs.jobs_per_digest = count_cycle[(curr_idx + 1) % len(count_cycle)]
             store.save_preferences(prefs)
         elif action == "cycle_exp":
-            exp_cycle = ["entry-level", "junior", "mid-level", "senior"]
+            exp_cycle = ["internship", "entry-level", "mid-level", "senior"]
             curr_idx = exp_cycle.index(prefs.experience_level) if prefs.experience_level in exp_cycle else 0
             prefs.experience_level = exp_cycle[(curr_idx + 1) % len(exp_cycle)]
             store.save_preferences(prefs)
@@ -450,24 +681,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Update message
         updated_prefs = store.get_preferences(user_id)
         text = format_preferences_message(updated_prefs)
         keyboard = get_preferences_keyboard(updated_prefs)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
 
-    # 3. Profile confirmation
-    elif data == "profile_ok":
-        await query.answer("Profile confirmed! Ready to find jobs.", show_alert=True)
-        await query.message.reply_text(
-            "🚀 <b>You're all set!</b>\n"
-            "Use /jobs to find matches now, or sit back and wait for your morning digest.",
-            parse_mode="HTML",
-        )
     elif data == "profile_reupload":
         await query.message.reply_text("📎 Send your new resume file (PDF, DOCX, TXT) whenever you're ready!")
 
-    # 4. Account deletion
+    # 8. Account deletion
     elif data.startswith("confirm_delete:"):
         target_uid = int(data.split(":")[1])
         if target_uid == user_id:
@@ -480,7 +702,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ==================== Text Message Handler ====================
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming text messages when editing preferences."""
+    """Handle text inputs during onboarding or preference editing."""
     user = update.effective_user
     if not user or not update.message or not update.message.text:
         return
@@ -493,7 +715,40 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         items = [x.strip() for x in text.split(",") if x.strip()]
         prefs = store.get_preferences(user_id)
 
-        if state == "edit_roles":
+        # Onboarding custom inputs
+        if state == "onb_custom_role":
+            prefs.roles = items
+            store.save_preferences(prefs)
+            step3_text = (
+                f"✅ <b>Target roles saved:</b> {', '.join(items)}\n\n"
+                "<b>Step 3 of 3: Where would you like to work?</b>"
+            )
+            await update.message.reply_text(
+                step3_text,
+                parse_mode="HTML",
+                reply_markup=get_step3_location_keyboard(),
+            )
+            return
+
+        elif state == "onb_custom_loc":
+            prefs.locations = items
+            store.save_preferences(prefs)
+            exp_label = get_exp_label(prefs.experience_type)
+            roles_label = ", ".join(prefs.roles)
+
+            step4_text = (
+                f"✅ <b>Location preferences saved:</b> {', '.join(items)}\n\n"
+                "🎉 <b>Questionnaire Complete!</b>\n\n"
+                "📄 <b>Final Step: Upload Your Resume</b>\n"
+                "Please send your resume file here as a <b>PDF, DOCX, or TXT</b> document.\n\n"
+                f"💡 <i>JobRadar will merge your answers ({exp_label}, {roles_label}) with your resume "
+                "skills, education, and projects to match you with top job openings!</i>"
+            )
+            await update.message.reply_text(step4_text, parse_mode="HTML")
+            return
+
+        # General preference edits
+        elif state == "edit_roles":
             prefs.roles = items
             store.save_preferences(prefs)
             await update.message.reply_text(f"✅ Updated target roles: <b>{', '.join(items)}</b>", parse_mode="HTML")
@@ -515,15 +770,12 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
-from telegram.ext import TypeHandler
-
-
 async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log every incoming update for easy debugging."""
+    """Log incoming updates for diagnostics."""
     if update.effective_user:
         msg = update.effective_message
-        text_preview = msg.text if (msg and msg.text) else (msg.document.file_name if (msg and msg.document) else "[Other]")
-        logger.info(f"📩 Telegram event from {update.effective_user.id} ({update.effective_user.first_name}): {text_preview}")
+        preview = msg.text if (msg and msg.text) else (msg.document.file_name if (msg and msg.document) else "[Other]")
+        logger.info(f"📩 Telegram event from {update.effective_user.id} ({update.effective_user.first_name}): {preview}")
 
 
 def register_handlers(application: Application) -> None:
@@ -548,5 +800,5 @@ def register_handlers(application: Application) -> None:
     # Inline button callbacks
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    # Text messages (preference edits)
+    # Text messages (custom inputs & preference edits)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))

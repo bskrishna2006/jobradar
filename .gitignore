@@ -8,10 +8,16 @@ env/
 venv/
 ENV/
 .venv/
-./freehire
-# Environment secrets
+
+# Ignored submodules and local packages
+freehire/
+freehire
+
+# Environment secrets & local DB stores
 .env
 .env.local
+.job_radar_local_store.json
+.test_store_mock.json
 
 # IDEs
 .vscode/
