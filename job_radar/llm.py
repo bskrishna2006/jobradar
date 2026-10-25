@@ -63,8 +63,23 @@ class GeminiLLMClient(BaseLLMClient):
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or settings.gemini_api_key
-        self.model = model or getattr(settings, "gemini_model", "gemini-2.5-flash-lite")
+        self.model = model or getattr(settings, "gemini_model", "gemini-3.5-flash-lite")
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+
+    @property
+    def candidate_models(self) -> list[str]:
+        return list(dict.fromkeys([
+            self.model,
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
+            "gemini-3.8-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+        ]))
 
     async def complete_text(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         if not self.api_key:
@@ -77,24 +92,28 @@ class GeminiLLMClient(BaseLLMClient):
         contents.append({"role": "user", "parts": [{"text": prompt}]})
 
         payload = {"contents": contents}
-        if self.api_key.startswith("AQ."):
-            raise ValueError(
-                "GEMINI_API_KEY starting with 'AQ.' is an OAuth token, not a standard Google AI Studio key (starts with 'AIzaSy...')."
-            )
-
         headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self.base_url}?key={self.api_key}",
-                json=payload,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            try:
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            except (KeyError, IndexError) as err:
-                raise ValueError(f"Malformed Gemini response: {data}") from err
+
+        async with httpx.AsyncClient(timeout=35.0) as client:
+            last_err = None
+            for m in self.candidate_models:
+                for api_ver in ("v1beta", "v1"):
+                    url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{m}:generateContent"
+                    try:
+                        resp = await client.post(
+                            f"{url}?key={self.api_key}",
+                            json=payload,
+                            headers=headers,
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            return data["candidates"][0]["content"]["parts"][0]["text"]
+                        last_err = f"{m} ({resp.status_code}): {resp.text}"
+                    except Exception as err:
+                        last_err = f"{m}: {err}"
+
+            logger.error(f"All Gemini model endpoints failed. Last error: {last_err}")
+            raise ValueError(f"Gemini API Error: {last_err}")
 
     async def complete_json(
         self,
@@ -122,26 +141,10 @@ class GeminiLLMClient(BaseLLMClient):
             "generationConfig": {"response_mime_type": "application/json"},
         }
 
-        # Try user-requested Gemini models in order
-        candidate_models = list(dict.fromkeys([
-            self.model,
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash",
-        ]))
-
-        if self.api_key.startswith("AQ."):
-            raise ValueError(
-                "GEMINI_API_KEY starting with 'AQ.' is an OAuth token, not a standard Google AI Studio key (starts with 'AIzaSy...'). "
-                "Falling back to local smart matcher."
-            )
-
         headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         async with httpx.AsyncClient(timeout=35.0) as client:
             last_err = None
-            for m in candidate_models:
+            for m in self.candidate_models:
                 for api_ver in ("v1beta", "v1"):
                     url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{m}:generateContent"
                     try:
