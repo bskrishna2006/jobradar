@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from typing import Any, Dict, Tuple
@@ -18,20 +19,24 @@ _application: Application | None = None
 
 
 def verify_secret_token(headers: Dict[str, str]) -> bool:
-    """Verify Telegram's X-Telegram-Bot-Api-Secret-Token header."""
+    """Verify Telegram's X-Telegram-Bot-Api-Secret-Token header using constant-time comparison."""
     expected_secret = settings.telegram_webhook_secret.strip()
     if not expected_secret:
-        # If no secret is configured, allow (e.g. in development/testing)
+        # If no secret is configured, allow in development but warn
+        logger.warning("TELEGRAM_WEBHOOK_SECRET is not configured! Webhook is accepting requests without verification.")
         return True
 
     # Case-insensitive header lookup
     received_secret = ""
     for k, v in headers.items():
         if k.lower() == "x-telegram-bot-api-secret-token":
-            received_secret = v
+            received_secret = v.strip()
             break
 
-    return received_secret == expected_secret
+    if not received_secret:
+        return False
+
+    return hmac.compare_digest(received_secret, expected_secret)
 
 
 async def get_bot_application() -> Application:

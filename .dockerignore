@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+.idea
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+.env
+.env.local
+.job_radar_local_store.json
+.test_store_mock.json
+freehire/
+*.log

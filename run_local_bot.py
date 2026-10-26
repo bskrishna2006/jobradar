@@ -72,17 +72,28 @@ async def periodic_job_radar_loop(app: Application, interval_seconds: int = TWO_
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log any unhandled exception in bot handlers and notify user if possible."""
+    """Log any unhandled exception in bot handlers, send friendly user message, and alert owner."""
     logger.error("Exception while handling an update:", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
-            err_text = html.escape(str(context.error))
             await update.effective_message.reply_text(
-                f"⚠️ An error occurred while processing your request:\n<code>{err_text[:3000]}</code>",
-                parse_mode="HTML",
+                "⚠️ Sorry, an unexpected error occurred while processing your request. "
+                "Our team has been alerted. Please try again shortly."
             )
         except Exception:
             pass
+
+    # If OWNER_CHAT_ID is configured, send the diagnostic trace privately to the bot administrator
+    if settings.owner_chat_id and context.bot and context.error:
+        try:
+            err_text = html.escape(str(context.error))
+            await context.bot.send_message(
+                chat_id=settings.owner_chat_id,
+                text=f"🚨 <b>JobRadar Exception Alert</b>\n\n<code>{err_text[:2000]}</code>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Could not deliver error alert to OWNER_CHAT_ID: {e}")
 
 
 async def on_startup(app: Application) -> None:

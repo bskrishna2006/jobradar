@@ -1,0 +1,16 @@
+services:
+  jobradar-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jobradar-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

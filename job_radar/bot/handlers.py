@@ -152,6 +152,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "<b>freehire.me</b>, <b>Greenhouse</b>, <b>Lever</b>, and <b>Ashby</b>, match them to your skills, "
         "and send direct opportunities every 2 hours.\n\n"
         "🛡️ <i>Note: I only discover and recommend direct openings. I NEVER auto-apply or spam.</i>\n\n"
+        "🔒 <i>By continuing, you confirm you are 18+ years of age and agree to our /privacy policy.</i>\n\n"
         "Let's set up your profile in 3 quick questions!\n\n"
         "<b>Step 1 of 3: What is your current experience status?</b>"
     )
@@ -179,6 +180,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/pause - Pause automated 2-hour job alerts\n"
         "/resume - Resume automated 2-hour job alerts\n"
         "/deleteme - Permanently purge your profile and all stored data\n"
+        "/privacy - View our DPDP Act data protection & privacy policy\n"
         "/help - Show this guide\n\n"
         "📎 <i>To update your resume, simply upload a PDF, DOCX, or TXT file at any time!</i>"
     )
@@ -371,6 +373,38 @@ async def deleteme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+async def privacy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /privacy command with itemized DPDP Act 2023 compliance notice."""
+    if not update.effective_user or not check_access(update.effective_user.id):
+        return
+
+    privacy_text = (
+        "🛡️ <b>JobRadar Privacy & Data Protection Notice</b>\n"
+        "<i>Compliant with the Digital Personal Data Protection Act, 2023 (DPDP Act, India)</i>\n\n"
+        "<b>1. Data Fiduciary & Purpose:</b>\n"
+        "• JobRadar processes your preferences and profile strictly to match and recommend verified job opportunities.\n"
+        "• We NEVER sell, share, or monetize your personal data.\n\n"
+        "<b>2. What Data We Process:</b>\n"
+        "• <b>Account:</b> Telegram user ID, username, and first name.\n"
+        "• <b>Profile:</b> Extracted technical skills, experience level, target roles, preferred locations, and project summaries.\n"
+        "• <b>Resume Files:</b> When you upload a resume, it is parsed in-memory. <b>Raw resume documents are NEVER stored on disk or in the database.</b>\n\n"
+        "<b>3. Third-Party Sub-Processors:</b>\n"
+        "• Google Gemini API (structured skill parsing and semantic fit scoring).\n"
+        "• Job APIs: Freehire.me, Greenhouse, Lever, and Ashby (read-only job discovery).\n\n"
+        "<b>4. Your Rights as a Data Principal:</b>\n"
+        "• <b>Right to Access:</b> View your profile anytime with /profile and /preferences.\n"
+        "• <b>Right to Erasure:</b> Permanently delete all your records anytime with /deleteme.\n"
+        "• <b>Right to Withdraw Consent:</b> Pause automated alerts anytime with /pause.\n\n"
+        "<b>5. Age Assurance:</b>\n"
+        "• This service is intended exclusively for individuals aged 18 and above.\n\n"
+        "<b>6. Grievance Redressal Officer:</b>\n"
+        "• Designated Grievance Officer: Krishna (JobRadar Administrator)\n"
+        "• Inquiries / Grievances: Contact via Telegram bot administrator.\n"
+        "• Resolution SLA: Grievances acknowledged within 48 hours and resolved within 30 days."
+    )
+    await update.message.reply_text(privacy_text, parse_mode="HTML")
 
 
 # ==================== Document (Resume) Handler ====================
@@ -781,6 +815,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("resume", resume_command))
     application.add_handler(CommandHandler("prep", prep_command))
     application.add_handler(CommandHandler("deleteme", deleteme_command))
+    application.add_handler(CommandHandler("privacy", privacy_command))
 
     # Documents (PDF, DOCX, TXT)
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))

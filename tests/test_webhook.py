@@ -27,3 +27,13 @@ def test_verify_secret_token():
 
     finally:
         settings.telegram_webhook_secret = original_secret
+
+
+def test_verify_secret_token_unconfigured_allows():
+    original_secret = settings.telegram_webhook_secret
+    try:
+        settings.telegram_webhook_secret = ""
+        # When unconfigured in dev, returns True
+        assert verify_secret_token({}) is True
+    finally:
+        settings.telegram_webhook_secret = original_secret
