@@ -1,9 +1,9 @@
-name: Daily JobRadar Digest
+name: JobRadar 2-Hour Matching Digest
 
 on:
   schedule:
-    # 03:00 UTC is 08:30 AM IST (India Standard Time is UTC + 05:30)
-    - cron: '0 3 * * *'
+    # Run every 2 hours automatically
+    - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -12,10 +12,10 @@ on:
         type: boolean
         default: false
       user_id:
-        description: 'Target specific Telegram User ID (optional)'
+        description: 'Target specific Telegram User ID (default: 6119045686)'
         required: false
         type: string
-        default: ''
+        default: '6119045686'
 
 jobs:
   run-daily-digest:
@@ -60,7 +60,8 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --dry-run"
           fi
-          if [ -n "${{ inputs.user_id }}" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --user-id ${{ inputs.user_id }}"
+          TARGET_UID="${{ inputs.user_id || '6119045686' }}"
+          if [ -n "$TARGET_UID" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --user-id $TARGET_UID"
           fi
           python daily_run.py $EXTRA_ARGS
